@@ -1,0 +1,62 @@
+use solana_program::{
+    account_info::{next_account_info, AccountInfo},
+    entrypoint,
+    entrypoint::ProgramResult,
+    msg,
+    program_error::ProgramError,
+    pubkey::Pubkey,
+    system_instruction,
+};
+entrypoint!(process_instruction);
+#[derive(Accounts)]
+pub struct Collector<'info> {
+    #[account(init, payer = owner, space = 8)]
+    pub collector_account: AccountInfo<'info>,
+    #[account(mut)]
+    pub owner: AccountInfo<'info>,
+    #[account(mut)]
+    pub destination_account: AccountInfo<'info>,
+}
+fn process_instruction(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let collector_account = next_account_info(account_info_iter)?;
+    let owner = next_account_info(account_info_iter)?;
+    let destination_account = next_account_info(account_info_iter)?;
+    // Initialize the collector account if it hasn't been initialized already
+    if collector_account.try_data_borrow_mut().is_ok() {
+        return Err(ProgramError::AccountAlreadyInitialized);
+    }
+    let instruction = system_instruction::create_account(
+        &owner.key,
+        &collector_account.key,
+        8,
+        1_000_000,
+        program_id
+    );
+    msg!("Calling system program to create the collector account");
+    invoke(&instruction, &[owner.clone(), collector_account.clone()])?;
+    msg!("Collector account created");
+    // Update the balance of the collector account when funds are sent to it
+    let amount = collector_account.try_lamports()?;
+    msg!("Adding {} lamports to the collector account balance", amount);
+    **collector_account.try_data_borrow_mut()? = amount.to_le_bytes();
+    // Withdraw funds from the collector account
+    let amount_bytes = &owner.data.borrow()[..8];
+    let amount = u64::from_le_bytes(*amount_bytes);
+    if amount > collector_account.try_lamports()? {
+        return Err(ProgramError::InsufficientFunds);
+    }
+    msg!("Transferring {} lamports to the destination account", amount);
+    let instruction = system_instruction::transfer(
+        &collector_account.key,
+        &destination_account.key,
+        amount
+    );
+    invoke(&instruction, &[collector_account.clone(), destination_account.clone()])?;
+    msg!("Funds transferred successfully");
+    // Update the balance of the collector account after withdrawing funds
+    let new_balance = collector_account.try_lamports()? - amount;
+    msg!("Updating collector account balance to {}", new_balance);
+    **collector_account.try_data_borrow_mut()? = new_balance.to_le_bytes();
+    Ok(())
+}
